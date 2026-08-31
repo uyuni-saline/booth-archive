@@ -1,0 +1,13 @@
+{
+  "name": "booth-archive",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A userscript that improves BOOTH browsing and archiving workflows.",
+  "scripts": {
+    "check": "node --check booth-archive.user.js",
+    "test": "node --test test/*.test.cjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
