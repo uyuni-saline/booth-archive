@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOOTH Archive
 // @namespace    https://github.com/uyuni-saline/booth-archive
-// @version      0.1.0
+// @version      0.2.0
 // @description  Improve BOOTH and BOOTH shop pages with optional browsing tools.
 // @author       uyuni-saline
 // @match        https://booth.pm/*
@@ -31,7 +31,11 @@
   'use strict';
 
   const FEATURE_KEY = 'hideUnavailableItems';
-  const CARD_SELECTOR = 'li.js-mount-point-shop-item-card';
+  const CARD_SELECTORS = [
+    'li.js-mount-point-shop-item-card',
+    'li.item-card.l-card',
+  ];
+  const CARD_SELECTOR = CARD_SELECTORS.join(', ');
   const HIDDEN_CLASS = 'booth-archive-hidden-item';
   const CONTROL_ID = 'booth-archive-filter-control';
   const STYLE_ID = 'booth-archive-style';
@@ -185,6 +189,7 @@
   }
 
   return {
+    CARD_SELECTOR,
     init,
     isUnavailableItem,
     parseItemData,
