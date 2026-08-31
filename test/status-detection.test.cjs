@@ -2,7 +2,11 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { isUnavailableItem, parseItemData } = require('../booth-archive.user.js');
+const {
+  CARD_SELECTOR,
+  isUnavailableItem,
+  parseItemData,
+} = require('../booth-archive.user.js');
 
 function makeCard(item, textContent = '') {
   return {
@@ -26,9 +30,14 @@ test('keeps an available item visible', () => {
   assert.equal(isUnavailableItem(makeCard({ is_end_of_sale: false, is_sold_out: false })), false);
 });
 
-test('falls back to visible status labels', () => {
+test('detects status labels used by dashboard item cards', () => {
   assert.equal(isUnavailableItem(makeCard(null, '商品名 在庫なし')), true);
   assert.equal(isUnavailableItem(makeCard(null, '商品名 販売終了')), true);
+});
+
+test('selects both shop and dashboard item cards', () => {
+  assert.match(CARD_SELECTOR, /js-mount-point-shop-item-card/);
+  assert.match(CARD_SELECTOR, /item-card\.l-card/);
 });
 
 test('handles malformed item data without throwing', () => {
