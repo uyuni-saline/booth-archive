@@ -1,6 +1,6 @@
 {
   "name": "booth-archive",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "description": "A userscript that improves BOOTH browsing and archiving workflows.",
   "scripts": {

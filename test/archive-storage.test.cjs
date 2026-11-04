@@ -29,10 +29,18 @@ test('downloads images then one JSON containing relative paths before marking ar
   assert(remembered);
   assert.equal(files.filter(name => name.endsWith('.json')).length, 1);
   assert.equal(json.status, 'complete');
+  assert.equal(json.archiveRelativePath, 'BOOTH存档/9021875/');
   for (const image of json.images) {
     assert.equal(image.relativePath, './' + image.file);
     assert(files.includes(json.archiveRelativePath + image.file));
   }
+});
+test('repeated archives use exactly the same download paths', async () => {
+  const first = [];
+  const second = [];
+  await saveProduct(product(), async (url, name) => first.push(name), () => {});
+  await saveProduct(product(), async (url, name) => second.push(name), () => {});
+  assert.deepEqual(first, second);
 });
 test('image or JSON download failure does not record completion', async () => {
   for (const failAt of [1, 3]) {

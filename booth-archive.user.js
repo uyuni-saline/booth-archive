@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOOTH Archive
 // @namespace    https://github.com/uyuni-saline/booth-archive
-// @version      0.5.0
+// @version      0.5.1
 // @description  BOOTH商品筛选、封面下载与本地存档工具。
 // @author       uyuni-saline
 // @match        https://booth.pm/*
@@ -335,12 +335,11 @@
     button.textContent = archived ? '已存档' : '本地存档';
     button.style.background = archived ? '#ddd' : '#fff';
     button.style.color = archived ? '#777' : '#000';
-    button.title = archived ? '此商品已有完成存档记录，点击可再次存档' : '将商品信息和图片保存到本地目录';
+    button.title = archived ? '此商品已有完成存档记录，点击可更新并覆盖同名文件' : '将商品信息和图片保存到本地目录';
   }
 
   async function saveProduct(product, download = downloadFile, remember = GM_setValue, progress = () => {}, folder = 'BOOTH存档') {
-    const snapshot = Date.now() + '-' + crypto.randomUUID();
-    const directory = cleanName(folder) + '/' + product.id + '/' + snapshot + '/';
+    const directory = cleanName(folder) + '/' + product.id + '/';
     const prefix = cleanName(product.shop.id + '_' + product.id);
     for (let i = 0; i < product.images.length; i++) {
       progress(i + 1, product.images.length);
