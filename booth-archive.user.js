@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOOTH Archive
 // @namespace    https://github.com/uyuni-saline/booth-archive
-// @version      0.2.0
+// @version      0.3.0
 // @description  Improve BOOTH and BOOTH shop pages with optional browsing tools.
 // @author       uyuni-saline
 // @match        https://booth.pm/*
@@ -9,6 +9,8 @@
 // @icon         https://booth.pm/favicon.ico
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_xmlhttpRequest
+// @connect      booth.pximg.net
 // @run-at       document-idle
 // @homepageURL  https://github.com/uyuni-saline/booth-archive
 // @supportURL   https://github.com/uyuni-saline/booth-archive/issues
@@ -169,6 +171,7 @@
 
   function updatePage() {
     updateScheduled = false;
+    createArchiveControl();
     createControl();
     applyFilter();
   }
@@ -188,10 +191,136 @@
     observer.observe(document.body, { childList: true, subtree: true });
   }
 
+  const cleanName = (value) => value.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/g, '').slice(0, 160) || 'unknown';
+
+  function extractProduct(doc = document, pageUrl = location.href) {
+    const id = new URL(pageUrl).pathname.match(/\/(?:[a-z]{2}\/)?items\/(\d+)/)?.[1];
+    if (!id) throw new Error('商品IDを取得できません。');
+    const text = (root, selector) => root.querySelector(selector)?.textContent.trim() || '';
+    const title = text(doc, 'h2.item-name');
+    const shopName = text(doc, '.shop-name-label') || text(doc, '.shop-name');
+    const shopLink = doc.querySelector('.shop-name a[href]');
+    const shopUrl = new URL(shopLink?.getAttribute('href') || '/', pageUrl).href;
+    const shopId = new URL(shopUrl).hostname.split('.')[0];
+    const images = Array.from(doc.querySelectorAll('img.market-item-detail-item-image[data-origin]'))
+      .filter(img => !img.closest('.slick-cloned'))
+      .map(img => img.getAttribute('data-origin'))
+      .filter(url => {
+        try { const u = new URL(url); return u.protocol === 'https:' && u.hostname === 'booth.pximg.net' && u.pathname.includes('/i/' + id + '/'); }
+        catch { return false; }
+      });
+    const variants = Array.from(doc.querySelectorAll('#variations .variation-item')).map(row => {
+      const priceText = text(row, '.variation-price');
+      return {
+        id: row.querySelector('[data-product-variant]')?.getAttribute('data-product-variant') || null,
+        name: text(row, '.variation-name .name') || text(row, '.variation-name'),
+        priceText, price: Number(priceText.replace(/[^0-9]/g, '')) || null, currency: 'JPY',
+        type: text(row, '.type'),
+      };
+    });
+    const links = Array.from(doc.querySelectorAll('.booth-description a[href]')).map(a => ({
+      label: a.textContent.trim() || a.querySelector('pixiv-icon')?.getAttribute('name') || a.href,
+      url: a.getAttribute('href'),
+    })).filter(link => /^https?:\/\//.test(link.url));
+    const descriptionNode = doc.querySelector('#js-item-info-detail .main-info-column .description')
+      || doc.querySelector('#js-item-info-detail .description');
+    if (!title || !images.length) throw new Error('商品名または原画像を取得できません。');
+    return {
+      schemaVersion: 1, id, title, sourceUrl: pageUrl, archivedAt: new Date().toISOString(),
+      shop: { id: shopId, name: shopName, url: shopUrl, links },
+      variants, description: descriptionNode?.innerText || descriptionNode?.textContent || '',
+      descriptionHtml: descriptionNode?.innerHTML || '', images: images.map(url => ({ url })),
+    };
+  }
+
+  function imageBlob(url) {
+    return new Promise((resolve, reject) => GM_xmlhttpRequest({
+      method: 'GET', url, responseType: 'blob', timeout: 60000,
+      onload: r => r.status === 200 && r.response?.size && r.response.type.startsWith('image/')
+        ? resolve(r.response) : reject(new Error('画像取得失敗: ' + r.status)),
+      onerror: () => reject(new Error('画像通信エラー')),
+      ontimeout: () => reject(new Error('画像取得タイムアウト')),
+    }));
+  }
+
+  function imageExtension(url) {
+    return new URL(url).pathname.match(/\.(png|jpe?g|gif|webp)$/i)?.[0] || '.jpg';
+  }
+
+  async function writeFile(dir, name, content) {
+    const handle = await dir.getFileHandle(name, { create: true });
+    const writer = await handle.createWritable();
+    try { await writer.write(content); await writer.close(); }
+    catch (error) { await writer.abort().catch(() => {}); throw error; }
+  }
+
+  let archiveRoot = null;
+  function createArchiveControl() {
+    if (!/\/(?:[a-z]{2}\/)?items\/\d+\/?$/.test(location.pathname)
+      || document.getElementById('booth-archive-product-tools')) return;
+    const title = document.querySelector('h2.item-name');
+    if (!title) return;
+    const panel = document.createElement('div');
+    panel.id = 'booth-archive-product-tools';
+    panel.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;padding:12px;background:#fff;color:#222';
+    const status = document.createElement('span');
+    status.setAttribute('role', 'status');
+    const buttons = [];
+    function button(label, action) {
+      const b = document.createElement('button');
+      b.type = 'button'; b.textContent = label;
+      b.style.cssText = 'padding:8px;border:1px solid #aaa;background:white;color:black;cursor:pointer';
+      b.onclick = async () => {
+        buttons.forEach(x => x.disabled = true);
+        status.textContent = '処理中…';
+        try { await action(); status.textContent = '完了'; }
+        catch (error) { status.textContent = '失敗: ' + error.message; }
+        finally { buttons.forEach(x => x.disabled = false); }
+      };
+      buttons.push(b); panel.append(b);
+    }
+    button('封面をダウンロード', async () => {
+      const product = extractProduct();
+      const blob = await imageBlob(product.images[0].url);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url;
+      a.download = cleanName('BOOTH ' + product.shop.name + ' ' + product.title) + imageExtension(product.images[0].url);
+      a.click(); setTimeout(() => URL.revokeObjectURL(url), 60000);
+    });
+    button('保存先フォルダーを選択', async () => {
+      if (!window.showDirectoryPicker) throw new Error('ローカル保存にはChromeまたはEdgeをご利用ください。');
+      archiveRoot = await window.showDirectoryPicker({ mode: 'readwrite', id: 'booth-archive' });
+    });
+    button('商品をローカル保存', async () => {
+      if (!archiveRoot) throw new Error('先に保存先フォルダーを選択してください。');
+      const product = extractProduct();
+      const parent = await archiveRoot.getDirectoryHandle(product.id, { create: true });
+      const dir = await parent.getDirectoryHandle(Date.now() + '-' + crypto.randomUUID(), { create: true });
+      const prefix = cleanName(product.shop.id + '_' + product.id);
+      await writeFile(dir, prefix + '_INCOMPLETE.json', JSON.stringify(product, null, 2));
+      for (let i = 0; i < product.images.length; i++) {
+        status.textContent = '画像保存 ' + (i + 1) + '/' + product.images.length;
+        const entry = product.images[i];
+        entry.file = prefix + '_' + String(i + 1).padStart(2, '0') + imageExtension(entry.url);
+        await writeFile(dir, entry.file, await imageBlob(entry.url));
+      }
+      await writeFile(dir, prefix + '_description.txt', product.description);
+      await writeFile(dir, prefix + '_product.json', JSON.stringify(product, null, 2));
+      await writeFile(dir, prefix + '_COMPLETE.json', JSON.stringify({ schemaVersion: 1, product: prefix + '_product.json' }));
+      await dir.removeEntry(prefix + '_INCOMPLETE.json');
+    });
+    panel.append(status);
+    title.after(panel);
+  }
+
   return {
     CARD_SELECTOR,
+    extractProduct,
+    cleanName,
+    imageExtension,
     init,
     isUnavailableItem,
     parseItemData,
   };
 });
+

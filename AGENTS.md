@@ -24,3 +24,4 @@ npm run check
 ```
 
 When a supplied page snapshot is available, also verify selectors and structured fields against that snapshot.
+

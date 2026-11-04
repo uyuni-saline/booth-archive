@@ -44,3 +44,4 @@ test('handles malformed item data without throwing', () => {
   assert.equal(parseItemData(makeCard('{broken-json')), null);
   assert.equal(isUnavailableItem(makeCard('{broken-json', '販売中')), false);
 });
+
