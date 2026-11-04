@@ -1,14 +1,15 @@
 // ==UserScript==
 // @name         BOOTH Archive
 // @namespace    https://github.com/uyuni-saline/booth-archive
-// @version      0.3.2
-// @description  Improve BOOTH and BOOTH shop pages with optional browsing tools.
+// @version      0.4.0
+// @description  BOOTH商品筛选、封面下载与本地存档工具。
 // @author       uyuni-saline
 // @match        https://booth.pm/*
 // @match        https://*.booth.pm/*
 // @icon         https://booth.pm/favicon.ico
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_registerMenuCommand
 // @grant        GM_xmlhttpRequest
 // @connect      booth.pximg.net
 // @run-at       document-idle
@@ -53,7 +54,7 @@
     try {
       return JSON.parse(rawItem);
     } catch (error) {
-      console.warn('[BOOTH Archive] Failed to parse item data.', error);
+      console.warn('[BOOTH存档] 无法解析商品数据。', error);
       return null;
     }
   }
@@ -84,7 +85,7 @@
 
     const count = document.querySelector(`#${CONTROL_ID} [data-role="count"]`);
     if (count) {
-      const nextText = filterEnabled ? `非表示: ${hiddenCount}` : '';
+      const nextText = filterEnabled ? `已隐藏：${hiddenCount}` : '';
       if (count.textContent !== nextText) count.textContent = nextText;
     }
   }
@@ -160,10 +161,10 @@
     const checkbox = document.createElement('input');
     checkbox.type = 'checkbox';
     checkbox.checked = filterEnabled;
-    checkbox.setAttribute('aria-label', '販売終了・在庫なしの商品を隠す');
+    checkbox.setAttribute('aria-label', '隐藏销售结束或无库存商品');
 
     const text = document.createElement('span');
-    text.textContent = '販売終了・在庫なしを隠す';
+    text.textContent = '隐藏销售结束／无库存商品';
 
     const count = document.createElement('span');
     count.dataset.role = 'count';
@@ -203,6 +204,8 @@
   }
 
   function init() {
+    if (typeof GM_registerMenuCommand === 'function') GM_registerMenuCommand('BOOTH存档设置', openSettings);
+    if (typeof indexedDB !== 'undefined') restoreDirectory().catch(error => console.warn('[BOOTH存档] 无法恢复目录设置', error));
     filterEnabled = Boolean(GM_getValue(FEATURE_KEY, false));
     injectStyle();
     updatePage();
@@ -215,7 +218,7 @@
 
   function extractProduct(doc = document, pageUrl = location.href) {
     const id = new URL(pageUrl).pathname.match(/\/(?:[a-z]{2}\/)?items\/(\d+)/)?.[1];
-    if (!id) throw new Error('商品IDを取得できません。');
+    if (!id) throw new Error('无法取得商品ID。');
     const text = (root, selector) => root.querySelector(selector)?.textContent.trim() || '';
     const title = text(doc, '#js-item-info-detail .summary header h2');
     const shopName = text(doc, '.shop-name-label') || text(doc, '.shop-name');
@@ -244,9 +247,9 @@
     })).filter(link => /^https?:\/\//.test(link.url));
     const descriptionNode = doc.querySelector('#js-item-info-detail .main-info-column .description')
       || doc.querySelector('#js-item-info-detail .description');
-    if (!title || !images.length) throw new Error('商品名または原画像を取得できません。');
+    if (!title || !images.length) throw new Error('无法取得商品名称或原图。');
     return {
-      schemaVersion: 1, id, title, sourceUrl: pageUrl, archivedAt: new Date().toISOString(),
+      schemaVersion: 2, id, title, sourceUrl: pageUrl, archivedAt: new Date().toISOString(),
       shop: { id: shopId, name: shopName, url: shopUrl, links },
       variants, description: descriptionNode?.innerText || descriptionNode?.textContent || '',
       descriptionHtml: descriptionNode?.innerHTML || '', images: images.map(url => ({ url })),
@@ -257,9 +260,9 @@
     return new Promise((resolve, reject) => GM_xmlhttpRequest({
       method: 'GET', url, responseType: 'blob', timeout: 60000,
       onload: r => r.status === 200 && r.response?.size && r.response.type.startsWith('image/')
-        ? resolve(r.response) : reject(new Error('画像取得失敗: ' + r.status)),
-      onerror: () => reject(new Error('画像通信エラー')),
-      ontimeout: () => reject(new Error('画像取得タイムアウト')),
+        ? resolve(r.response) : reject(new Error('图片获取失败：' + r.status)),
+      onerror: () => reject(new Error('图片网络请求失败')),
+      ontimeout: () => reject(new Error('图片获取超时')),
     }));
   }
 
@@ -275,6 +278,107 @@
   }
 
   let archiveRoot = null;
+  // Directory handles are structured-cloneable, not JSON serializable.
+  function directoryStore(mode, action) {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open('booth-archive-settings', 1);
+      request.onupgradeneeded = () => request.result.createObjectStore('settings');
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const db = request.result;
+        const tx = db.transaction('settings', mode);
+        let result;
+        try {
+          const operation = action(tx.objectStore('settings'));
+          operation.onsuccess = () => { result = operation.result; };
+        } catch (error) { db.close(); reject(error); return; }
+        tx.oncomplete = () => { db.close(); resolve(result); };
+        tx.onerror = tx.onabort = () => { db.close(); reject(tx.error || new Error('目录设置保存失败')); };
+      };
+    });
+  }
+
+  async function selectDirectory() {
+    if (!window.showDirectoryPicker) throw new Error('本地存档需要Chrome或Edge浏览器。');
+    const handle = await window.showDirectoryPicker({ mode: 'readwrite', id: 'booth-archive' });
+    await directoryStore('readwrite', store => store.put(handle, 'directory'));
+    archiveRoot = handle;
+    return handle;
+  }
+
+  async function restoreDirectory() {
+    archiveRoot = archiveRoot || await directoryStore('readonly', store => store.get('directory'));
+    return archiveRoot;
+  }
+
+  async function requireDirectory() {
+    const handle = await restoreDirectory();
+    if (!handle) throw new Error('请先在存档设置中选择本地目录。');
+    if (await handle.queryPermission({ mode: 'readwrite' }) !== 'granted'
+      && await handle.requestPermission({ mode: 'readwrite' }) !== 'granted') {
+      throw new Error('未获得目录写入权限，请在设置中重新授权或选择目录。');
+    }
+    return handle;
+  }
+
+  function openSettings() {
+    if (document.getElementById('booth-archive-settings-dialog')) return;
+    const dialog = document.createElement('dialog');
+    dialog.id = 'booth-archive-settings-dialog';
+    dialog.style.cssText = 'max-width:480px;padding:24px;color:#222;background:white;border:1px solid #aaa;border-radius:8px';
+    const heading = document.createElement('h2'); heading.textContent = 'BOOTH存档设置';
+    const help = document.createElement('p');
+    help.textContent = '目录选择会在当前商店长期记忆。浏览器可能要求重新授权；不同商店子域名需要分别选择同一目录。清除网站数据会清除目录记忆。';
+    const info = document.createElement('p'); info.textContent = '正在读取目录设置…';
+    const choose = document.createElement('button'); choose.textContent = '选择／更换本地存档目录';
+    choose.onclick = async () => {
+      try { info.textContent = '已记住目录：' + (await selectDirectory()).name; }
+      catch (error) { info.textContent = '选择失败：' + error.message; }
+    };
+    const authorize = document.createElement('button'); authorize.textContent = '重新授权目录';
+    authorize.onclick = async () => {
+      try { info.textContent = '目录已授权：' + (await requireDirectory()).name; }
+      catch (error) { info.textContent = error.message; }
+    };
+    const close = document.createElement('button'); close.textContent = '关闭';
+    close.onclick = () => { dialog.close(); dialog.remove(); };
+    dialog.addEventListener('cancel', () => dialog.remove());
+    dialog.append(heading, help, info, choose, authorize, close);
+    document.body.appendChild(dialog); dialog.showModal();
+    restoreDirectory().then(handle => { info.textContent = handle ? '已记住目录：' + handle.name : '尚未选择目录'; })
+      .catch(error => { info.textContent = '无法读取设置：' + error.message; });
+  }
+
+  function archiveMemoryKey(id) { return 'archived-product:' + id; }
+  function refreshArchiveButton(button, id) {
+    const archived = Boolean(GM_getValue(archiveMemoryKey(id), null));
+    button.textContent = archived ? '已存档' : '本地存档';
+    button.style.background = archived ? '#ddd' : '#fff';
+    button.style.color = archived ? '#777' : '#000';
+    button.title = archived ? '此商品已有完成存档记录，点击可再次存档' : '将商品信息和图片保存到本地目录';
+  }
+
+  async function saveProduct(root, product, fetchImage = imageBlob, remember = GM_setValue, progress = () => {}) {
+    const parent = await root.getDirectoryHandle(product.id, { create: true });
+    const snapshot = Date.now() + '-' + crypto.randomUUID();
+    const dir = await parent.getDirectoryHandle(snapshot, { create: true });
+    const prefix = cleanName(product.shop.id + '_' + product.id);
+    for (let i = 0; i < product.images.length; i++) {
+      progress(i + 1, product.images.length);
+      const entry = product.images[i];
+      entry.file = prefix + '_' + String(i + 1).padStart(2, '0') + imageExtension(entry.url);
+      entry.relativePath = './' + entry.file;
+      await writeFile(dir, entry.file, await fetchImage(entry.url));
+    }
+    product.status = 'complete';
+    product.archiveRelativePath = product.id + '/' + snapshot + '/';
+    await writeFile(dir, prefix + '_product.json', JSON.stringify(product, null, 2));
+    remember(archiveMemoryKey(product.id), {
+      archivedAt: product.archivedAt,
+      relativePath: product.archiveRelativePath + prefix + '_product.json',
+    });
+    return product;
+  }
   function createArchiveControl() {
     if (!/\/(?:[a-z]{2}\/)?items\/\d+\/?$/.test(location.pathname)
       || document.getElementById('booth-archive-product-tools')) return;
@@ -290,14 +394,15 @@
       b.style.cssText = 'padding:8px;border:1px solid #aaa;background:white;color:black;cursor:pointer';
       b.onclick = async () => {
         buttons.forEach(x => x.disabled = true);
-        status.textContent = '処理中…';
-        try { await action(); status.textContent = '完了'; }
-        catch (error) { status.textContent = '失敗: ' + error.message; }
+        status.textContent = '处理中…';
+        try { await action(); status.textContent = '完成'; }
+        catch (error) { status.textContent = '失败：' + error.message; }
         finally { buttons.forEach(x => x.disabled = false); }
       };
       buttons.push(b); panel.append(b);
+      return b;
     }
-    button('封面をダウンロード', async () => {
+    button('下载封面', async () => {
       const product = extractProduct();
       const blob = await imageBlob(product.images[0].url);
       const url = URL.createObjectURL(blob);
@@ -305,28 +410,15 @@
       a.download = cleanName('BOOTH ' + product.shop.name + ' ' + product.title) + imageExtension(product.images[0].url);
       a.click(); setTimeout(() => URL.revokeObjectURL(url), 60000);
     });
-    button('保存先フォルダーを選択', async () => {
-      if (!window.showDirectoryPicker) throw new Error('ローカル保存にはChromeまたはEdgeをご利用ください。');
-      archiveRoot = await window.showDirectoryPicker({ mode: 'readwrite', id: 'booth-archive' });
-    });
-    button('商品をローカル保存', async () => {
-      if (!archiveRoot) throw new Error('先に保存先フォルダーを選択してください。');
+    button('存档设置', openSettings);
+    const archiveButton = button('本地存档', async () => {
+      const root = await requireDirectory();
       const product = extractProduct();
-      const parent = await archiveRoot.getDirectoryHandle(product.id, { create: true });
-      const dir = await parent.getDirectoryHandle(Date.now() + '-' + crypto.randomUUID(), { create: true });
-      const prefix = cleanName(product.shop.id + '_' + product.id);
-      await writeFile(dir, prefix + '_INCOMPLETE.json', JSON.stringify(product, null, 2));
-      for (let i = 0; i < product.images.length; i++) {
-        status.textContent = '画像保存 ' + (i + 1) + '/' + product.images.length;
-        const entry = product.images[i];
-        entry.file = prefix + '_' + String(i + 1).padStart(2, '0') + imageExtension(entry.url);
-        await writeFile(dir, entry.file, await imageBlob(entry.url));
-      }
-      await writeFile(dir, prefix + '_description.txt', product.description);
-      await writeFile(dir, prefix + '_product.json', JSON.stringify(product, null, 2));
-      await writeFile(dir, prefix + '_COMPLETE.json', JSON.stringify({ schemaVersion: 1, product: prefix + '_product.json' }));
-      await dir.removeEntry(prefix + '_INCOMPLETE.json');
+      await saveProduct(root, product, imageBlob, GM_setValue,
+        (index, count) => { status.textContent = '正在保存图片 ' + index + '/' + count; });
+      refreshArchiveButton(archiveButton, product.id);
     });
+    refreshArchiveButton(archiveButton, location.pathname.match(/items\/(\d+)/)[1]);
     panel.append(status);
     getDock().prepend(panel);
   }
@@ -336,6 +428,10 @@
     extractProduct,
     cleanName,
     imageExtension,
+    archiveMemoryKey,
+    refreshArchiveButton,
+    saveProduct,
+    directoryStore,
     init,
     isUnavailableItem,
     parseItemData,
