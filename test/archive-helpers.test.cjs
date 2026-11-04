@@ -31,28 +31,30 @@ test('extracts current product title without using recommendation headings', () 
     'SugarChouChou Tart Collection アクリルブロック');
 });
 
-test('browser bootstrap mounts archive buttons with no recommendation cards', () => {
+test('browser bootstrap mounts floating archive buttons without any product detail DOM', () => {
   const nodes = new Map();
   const element = () => ({
-    style: {}, children: [], setAttribute() {},
-    append(...children) { this.children.push(...children); },
+    style: {}, dataset: {}, children: [], setAttribute() {}, addEventListener() {},
+    append(...children) { this.children.push(...children); children.forEach(node => nodes.set(node.id, node)); },
+    prepend(node) { this.children.unshift(node); nodes.set(node.id, node); },
   });
-  const detail = { prepend(node) { nodes.set(node.id, node); } };
   const context = {
     URL, console,
     location: { pathname: '/items/9021875', href: 'https://wlabel.booth.pm/items/9021875' },
     GM_getValue: () => false,
     MutationObserver: class { observe() {} },
     document: {
-      getElementById: id => id === 'js-item-info-detail' ? detail : nodes.get(id),
+      getElementById: id => nodes.get(id),
       createElement: element,
       querySelector: () => null,
-      querySelectorAll: () => [],
-      head: { appendChild() {} }, body: {},
+      querySelectorAll: () => [{ classList: { toggle() {} } }],
+      head: { appendChild() {} }, body: { appendChild(node) { nodes.set(node.id, node); } },
     },
   };
   vm.runInNewContext(fs.readFileSync(require.resolve('../booth-archive.user.js'), 'utf8'), context);
   const panel = nodes.get('booth-archive-product-tools');
   assert(panel);
   assert.equal(panel.children.filter(child => child.type === 'button').length, 3);
+  assert.equal(nodes.get('booth-archive-dock').children[0], panel);
+  assert.equal(nodes.get('booth-archive-dock').children[1].id, 'booth-archive-filter-control');
 });

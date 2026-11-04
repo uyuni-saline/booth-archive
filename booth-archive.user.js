@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOOTH Archive
 // @namespace    https://github.com/uyuni-saline/booth-archive
-// @version      0.3.1
+// @version      0.3.2
 // @description  Improve BOOTH and BOOTH shop pages with optional browsing tools.
 // @author       uyuni-saline
 // @match        https://booth.pm/*
@@ -99,11 +99,21 @@
         display: none !important;
       }
 
-      #${CONTROL_ID} {
+      #booth-archive-dock {
         position: fixed;
         right: 18px;
         bottom: 18px;
         z-index: 10000;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 8px;
+        max-width: calc(100vw - 36px);
+        max-height: calc(100dvh - 36px);
+        overflow: auto;
+      }
+
+      #${CONTROL_ID} {
         display: flex;
         align-items: center;
         gap: 10px;
@@ -166,7 +176,17 @@
 
     label.append(checkbox, text);
     control.append(label, count);
-    document.body.appendChild(control);
+    getDock().append(control);
+  }
+
+  function getDock() {
+    let dock = document.getElementById('booth-archive-dock');
+    if (!dock) {
+      dock = document.createElement('div');
+      dock.id = 'booth-archive-dock';
+      document.body.appendChild(dock);
+    }
+    return dock;
   }
 
   function updatePage() {
@@ -258,11 +278,9 @@
   function createArchiveControl() {
     if (!/\/(?:[a-z]{2}\/)?items\/\d+\/?$/.test(location.pathname)
       || document.getElementById('booth-archive-product-tools')) return;
-    const detail = document.getElementById('js-item-info-detail');
-    if (!detail) return;
     const panel = document.createElement('div');
     panel.id = 'booth-archive-product-tools';
-    panel.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;padding:12px;background:#fff;color:#222';
+    panel.style.cssText = 'display:flex;flex-direction:column;gap:8px;max-width:100%;padding:12px;background:#fff;color:#222;border:1px solid #d7d7d7;border-radius:8px;box-shadow:0 3px 12px #0002;font:14px/1.4 sans-serif';
     const status = document.createElement('span');
     status.setAttribute('role', 'status');
     const buttons = [];
@@ -310,7 +328,7 @@
       await dir.removeEntry(prefix + '_INCOMPLETE.json');
     });
     panel.append(status);
-    detail.prepend(panel);
+    getDock().prepend(panel);
   }
 
   return {
