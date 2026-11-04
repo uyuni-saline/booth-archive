@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOOTH Archive
 // @namespace    https://github.com/uyuni-saline/booth-archive
-// @version      0.5.1
+// @version      0.6.0
 // @description  BOOTH商品筛选、封面下载与本地存档工具。
 // @author       uyuni-saline
 // @match        https://booth.pm/*
@@ -9,6 +9,8 @@
 // @icon         https://booth.pm/favicon.ico
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_listValues
+// @grant        GM_deleteValue
 // @grant        GM_registerMenuCommand
 // @grant        GM_download
 // @grant        GM_info
@@ -304,6 +306,52 @@
     }
   }
 
+  function listArchiveRecords() {
+    return GM_listValues().filter(key => /^archived-product:\d+$/.test(key)).map(key => ({
+      ...GM_getValue(key, {}), id: key.slice('archived-product:'.length),
+    }));
+  }
+
+  function parseRecordBackup(value) {
+    if (!value || value.format !== 'booth-archive-records' || value.version !== 1 || !Array.isArray(value.records)) {
+      throw new Error('不是受支持的BOOTH存档记录备份文件。');
+    }
+    const seen = new Set();
+    return value.records.map(record => {
+      if (!record || typeof record.id !== 'string' || !/^\d+$/.test(record.id)
+        || typeof record.archivedAt !== 'string' || !Number.isFinite(Date.parse(record.archivedAt))
+        || typeof record.relativePath !== 'string' || seen.has(record.id)) {
+        throw new Error('备份包含无效或重复记录，未导入任何内容。');
+      }
+      seen.add(record.id);
+      return { id: record.id, archivedAt: record.archivedAt, relativePath: record.relativePath };
+    });
+  }
+
+  function importArchiveRecords(backup) {
+    const records = parseRecordBackup(backup); // Validate everything before writing.
+    let added = 0;
+    for (const { id, ...record } of records) {
+      if (!GM_getValue(archiveMemoryKey(id), null)) {
+        GM_setValue(archiveMemoryKey(id), record);
+        added++;
+      }
+    }
+    return { added, skipped: records.length - added };
+  }
+
+  function clearArchiveRecords() {
+    const keys = GM_listValues().filter(key => /^archived-product:\d+$/.test(key));
+    keys.forEach(key => GM_deleteValue(key));
+    return keys.length;
+  }
+
+  function refreshCurrentArchiveButton() {
+    const id = productId(location.href);
+    const button = document.getElementById('booth-archive-save-product');
+    if (button && id) refreshArchiveButton(button, id);
+  }
+
   function openSettings() {
     if (document.getElementById('booth-archive-settings-dialog')) return;
     const dialog = document.createElement('dialog');
@@ -322,10 +370,52 @@
       GM_setValue('downloadFolder', cleanName(input.value.trim()));
       info.textContent = '设置已保存，在所有商店共用。';
     };
+    const recordsHelp = document.createElement('p');
+    recordsHelp.textContent = '存档记录管理：当前共' + listArchiveRecords().length + '条。仅管理已存档标记，不包含图片和商品JSON，也不会删除下载文件。导入采用合并方式，已有商品记录保持不变。';
+    const exportButton = document.createElement('button'); exportButton.textContent = '导出存档记录';
+    exportButton.onclick = async () => {
+      exportButton.disabled = true;
+      let url;
+      try {
+        requireDownloadMode();
+        const backup = { format: 'booth-archive-records', version: 1, exportedAt: new Date().toISOString(), records: listArchiveRecords() };
+        url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' }));
+        await downloadFile(url, 'BOOTH存档记录_' + new Date().toISOString().replace(/[:.]/g, '-') + '.json');
+        info.textContent = '已导出' + backup.records.length + '条记录。';
+      } catch (error) { info.textContent = '导出失败：' + error.message; }
+      finally { if (url) URL.revokeObjectURL(url); exportButton.disabled = false; }
+    };
+    const fileInput = document.createElement('input');
+    fileInput.type = 'file'; fileInput.accept = '.json,application/json'; fileInput.hidden = true;
+    const importButton = document.createElement('button'); importButton.textContent = '导入存档记录';
+    importButton.onclick = () => fileInput.click();
+    fileInput.onchange = async () => {
+      const file = fileInput.files?.[0];
+      if (!file) return;
+      importButton.disabled = true;
+      try {
+        if (file.size > 10 * 1024 * 1024) throw new Error('备份文件超过10MB限制。');
+        const result = importArchiveRecords(JSON.parse(await file.text()));
+        refreshCurrentArchiveButton();
+        recordsHelp.textContent = '当前共有' + listArchiveRecords().length + '条存档记录（仅标记，不含本地文件）。';
+        info.textContent = '导入完成：新增' + result.added + '条，保留已有记录' + result.skipped + '条。';
+      } catch (error) { info.textContent = '导入失败：' + error.message; }
+      finally { fileInput.value = ''; importButton.disabled = false; }
+    };
+    const clearButton = document.createElement('button'); clearButton.textContent = '清除存档记录';
+    clearButton.onclick = () => {
+      if (!window.confirm('确定清除全部已存档标记？建议先导出备份。此操作不会删除图片、商品JSON或插件设置。')) return;
+      try {
+        const count = clearArchiveRecords();
+        refreshCurrentArchiveButton();
+        recordsHelp.textContent = '当前共有0条存档记录（仅标记，不含本地文件）。';
+        info.textContent = '已清除' + count + '条记录，下载文件未改动。';
+      } catch (error) { info.textContent = '清除失败：' + error.message; }
+    };
     const close = document.createElement('button'); close.textContent = '关闭';
     close.onclick = () => { dialog.close(); dialog.remove(); };
     dialog.addEventListener('cancel', () => dialog.remove());
-    dialog.append(heading, help, label, info, save, close);
+    dialog.append(heading, help, label, save, recordsHelp, exportButton, importButton, fileInput, clearButton, info, close);
     document.body.appendChild(dialog); dialog.showModal();
   }
 
@@ -398,6 +488,7 @@
         (index, count) => { status.textContent = '正在下载图片 ' + index + '/' + count; }, GM_getValue('downloadFolder', 'BOOTH存档'));
       refreshArchiveButton(archiveButton, product.id);
     });
+    archiveButton.id = 'booth-archive-save-product';
     refreshArchiveButton(archiveButton, location.pathname.match(/items\/(\d+)/)[1]);
     panel.append(status);
     getDock().prepend(panel);
@@ -414,6 +505,10 @@
     productId,
     resolveShop,
     downloadFile,
+    listArchiveRecords,
+    parseRecordBackup,
+    importArchiveRecords,
+    clearArchiveRecords,
     init,
     isUnavailableItem,
     parseItemData,
