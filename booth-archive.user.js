@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOOTH Archive
 // @namespace    https://github.com/uyuni-saline/booth-archive
-// @version      0.4.0
+// @version      0.5.0
 // @description  BOOTH商品筛选、封面下载与本地存档工具。
 // @author       uyuni-saline
 // @match        https://booth.pm/*
@@ -10,6 +10,8 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
+// @grant        GM_download
+// @grant        GM_info
 // @grant        GM_xmlhttpRequest
 // @connect      booth.pximg.net
 // @run-at       document-idle
@@ -205,7 +207,6 @@
 
   function init() {
     if (typeof GM_registerMenuCommand === 'function') GM_registerMenuCommand('BOOTH存档设置', openSettings);
-    if (typeof indexedDB !== 'undefined') restoreDirectory().catch(error => console.warn('[BOOTH存档] 无法恢复目录设置', error));
     filterEnabled = Boolean(GM_getValue(FEATURE_KEY, false));
     injectStyle();
     updatePage();
@@ -216,15 +217,33 @@
 
   const cleanName = (value) => value.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/g, '').slice(0, 160) || 'unknown';
 
+  function productId(url) {
+    return new URL(url).pathname.match(/^\/(?:[a-z]{2}\/)?items\/(\d+)\/?$/)?.[1] || null;
+  }
+
+  function resolveShop(doc, pageUrl) {
+    const candidates = [
+      doc.querySelector('[data-product-brand]')?.getAttribute('data-product-brand'),
+      ...Array.from(doc.querySelectorAll('.shop-name a[href], .booth-title a[href], .shop-name-label a[href]'))
+        .map(a => { try { return new URL(a.getAttribute('href'), pageUrl).hostname.split('.')[0]; } catch { return null; } }),
+      new URL(pageUrl).hostname.endsWith('.booth.pm') ? new URL(pageUrl).hostname.split('.')[0] : null,
+    ];
+    const id = candidates.find(value => value && /^[a-z0-9_-]+$/i.test(value) && !['booth', 'www', 'accounts'].includes(value));
+    if (!id) throw new Error('无法识别商店，请从商店子域名打开商品后重试。');
+    return { id, url: 'https://' + id + '.booth.pm/' };
+  }
+
   function extractProduct(doc = document, pageUrl = location.href) {
-    const id = new URL(pageUrl).pathname.match(/\/(?:[a-z]{2}\/)?items\/(\d+)/)?.[1];
+    const id = productId(pageUrl);
     if (!id) throw new Error('无法取得商品ID。');
     const text = (root, selector) => root.querySelector(selector)?.textContent.trim() || '';
-    const title = text(doc, '#js-item-info-detail .summary header h2');
-    const shopName = text(doc, '.shop-name-label') || text(doc, '.shop-name');
-    const shopLink = doc.querySelector('.shop-name a[href]');
-    const shopUrl = new URL(shopLink?.getAttribute('href') || '/', pageUrl).href;
-    const shopId = new URL(shopUrl).hostname.split('.')[0];
+    const shopName = text(doc, '.shop-name-label') || text(doc, '.shop-name') || text(doc, '.booth-title');
+    const metaTitle = doc.querySelector('meta[property="og:title"]')?.getAttribute('content') || '';
+    const suffix = ' - ' + shopName + ' - BOOTH';
+    const title = text(doc, '#js-item-info-detail .summary header h2')
+      || text(doc, '#js-item-info-detail h1')
+      || (shopName && metaTitle.endsWith(suffix) ? metaTitle.slice(0, -suffix.length) : '');
+    const { id: shopId, url: shopUrl } = resolveShop(doc, pageUrl);
     const images = Array.from(doc.querySelectorAll('img.market-item-detail-item-image[data-origin]'))
       .filter(img => !img.closest('.slick-cloned'))
       .map(img => img.getAttribute('data-origin'))
@@ -249,7 +268,7 @@
       || doc.querySelector('#js-item-info-detail .description');
     if (!title || !images.length) throw new Error('无法取得商品名称或原图。');
     return {
-      schemaVersion: 2, id, title, sourceUrl: pageUrl, archivedAt: new Date().toISOString(),
+      schemaVersion: 3, id, title, canonicalUrl: 'https://booth.pm/ja/items/' + id, sourceUrl: pageUrl, archivedAt: new Date().toISOString(),
       shop: { id: shopId, name: shopName, url: shopUrl, links },
       variants, description: descriptionNode?.innerText || descriptionNode?.textContent || '',
       descriptionHtml: descriptionNode?.innerHTML || '', images: images.map(url => ({ url })),
@@ -270,55 +289,19 @@
     return new URL(url).pathname.match(/\.(png|jpe?g|gif|webp)$/i)?.[0] || '.jpg';
   }
 
-  async function writeFile(dir, name, content) {
-    const handle = await dir.getFileHandle(name, { create: true });
-    const writer = await handle.createWritable();
-    try { await writer.write(content); await writer.close(); }
-    catch (error) { await writer.abort().catch(() => {}); throw error; }
+  function downloadFile(url, name) {
+    return new Promise((resolve, reject) => GM_download({
+      url, name, saveAs: false, conflictAction: 'overwrite',
+      onload: resolve,
+      onerror: error => reject(new Error('下载失败：' + (error.error || error.details || '未知错误') + '；请检查油猴下载权限及扩展名白名单。')),
+      ontimeout: () => reject(new Error('下载超时')),
+    }));
   }
 
-  let archiveRoot = null;
-  // Directory handles are structured-cloneable, not JSON serializable.
-  function directoryStore(mode, action) {
-    return new Promise((resolve, reject) => {
-      const request = indexedDB.open('booth-archive-settings', 1);
-      request.onupgradeneeded = () => request.result.createObjectStore('settings');
-      request.onerror = () => reject(request.error);
-      request.onsuccess = () => {
-        const db = request.result;
-        const tx = db.transaction('settings', mode);
-        let result;
-        try {
-          const operation = action(tx.objectStore('settings'));
-          operation.onsuccess = () => { result = operation.result; };
-        } catch (error) { db.close(); reject(error); return; }
-        tx.oncomplete = () => { db.close(); resolve(result); };
-        tx.onerror = tx.onabort = () => { db.close(); reject(tx.error || new Error('目录设置保存失败')); };
-      };
-    });
-  }
-
-  async function selectDirectory() {
-    if (!window.showDirectoryPicker) throw new Error('本地存档需要Chrome或Edge浏览器。');
-    const handle = await window.showDirectoryPicker({ mode: 'readwrite', id: 'booth-archive' });
-    await directoryStore('readwrite', store => store.put(handle, 'directory'));
-    archiveRoot = handle;
-    return handle;
-  }
-
-  async function restoreDirectory() {
-    archiveRoot = archiveRoot || await directoryStore('readonly', store => store.get('directory'));
-    return archiveRoot;
-  }
-
-  async function requireDirectory() {
-    const handle = await restoreDirectory();
-    if (!handle) throw new Error('请先在存档设置中选择本地目录。');
-    if (await handle.queryPermission({ mode: 'readwrite' }) !== 'granted'
-      && await handle.requestPermission({ mode: 'readwrite' }) !== 'granted') {
-      throw new Error('未获得目录写入权限，请在设置中重新授权或选择目录。');
+  function requireDownloadMode() {
+    if (typeof GM_info !== 'undefined' && GM_info.downloadMode !== 'browser') {
+      throw new Error('请在Tampermonkey设置中将下载模式设为“浏览器API”，并允许下载权限。');
     }
-    return handle;
   }
 
   function openSettings() {
@@ -328,25 +311,22 @@
     dialog.style.cssText = 'max-width:480px;padding:24px;color:#222;background:white;border:1px solid #aaa;border-radius:8px';
     const heading = document.createElement('h2'); heading.textContent = 'BOOTH存档设置';
     const help = document.createElement('p');
-    help.textContent = '目录选择会在当前商店长期记忆。浏览器可能要求重新授权；不同商店子域名需要分别选择同一目录。清除网站数据会清除目录记忆。';
-    const info = document.createElement('p'); info.textContent = '正在读取目录设置…';
-    const choose = document.createElement('button'); choose.textContent = '选择／更换本地存档目录';
-    choose.onclick = async () => {
-      try { info.textContent = '已记住目录：' + (await selectDirectory()).name; }
-      catch (error) { info.textContent = '选择失败：' + error.message; }
-    };
-    const authorize = document.createElement('button'); authorize.textContent = '重新授权目录';
-    authorize.onclick = async () => {
-      try { info.textContent = '目录已授权：' + (await requireDirectory()).name; }
-      catch (error) { info.textContent = error.message; }
+    help.textContent = '文件批量下载至浏览器默认下载目录，无需商店目录授权。请将油猴下载模式设为“浏览器API”，允许下载权限及json、图片扩展名。关闭浏览器的“下载前询问保存位置”以避免逐文件询问。';
+    const label = document.createElement('label'); label.textContent = '下载目录内的存档文件夹名：';
+    const input = document.createElement('input');
+    input.value = GM_getValue('downloadFolder', 'BOOTH存档');
+    label.append(input);
+    const info = document.createElement('p');
+    const save = document.createElement('button'); save.textContent = '保存设置';
+    save.onclick = () => {
+      GM_setValue('downloadFolder', cleanName(input.value.trim()));
+      info.textContent = '设置已保存，在所有商店共用。';
     };
     const close = document.createElement('button'); close.textContent = '关闭';
     close.onclick = () => { dialog.close(); dialog.remove(); };
     dialog.addEventListener('cancel', () => dialog.remove());
-    dialog.append(heading, help, info, choose, authorize, close);
+    dialog.append(heading, help, label, info, save, close);
     document.body.appendChild(dialog); dialog.showModal();
-    restoreDirectory().then(handle => { info.textContent = handle ? '已记住目录：' + handle.name : '尚未选择目录'; })
-      .catch(error => { info.textContent = '无法读取设置：' + error.message; });
   }
 
   function archiveMemoryKey(id) { return 'archived-product:' + id; }
@@ -358,21 +338,22 @@
     button.title = archived ? '此商品已有完成存档记录，点击可再次存档' : '将商品信息和图片保存到本地目录';
   }
 
-  async function saveProduct(root, product, fetchImage = imageBlob, remember = GM_setValue, progress = () => {}) {
-    const parent = await root.getDirectoryHandle(product.id, { create: true });
+  async function saveProduct(product, download = downloadFile, remember = GM_setValue, progress = () => {}, folder = 'BOOTH存档') {
     const snapshot = Date.now() + '-' + crypto.randomUUID();
-    const dir = await parent.getDirectoryHandle(snapshot, { create: true });
+    const directory = cleanName(folder) + '/' + product.id + '/' + snapshot + '/';
     const prefix = cleanName(product.shop.id + '_' + product.id);
     for (let i = 0; i < product.images.length; i++) {
       progress(i + 1, product.images.length);
       const entry = product.images[i];
       entry.file = prefix + '_' + String(i + 1).padStart(2, '0') + imageExtension(entry.url);
       entry.relativePath = './' + entry.file;
-      await writeFile(dir, entry.file, await fetchImage(entry.url));
+      await download(entry.url, directory + entry.file);
     }
     product.status = 'complete';
-    product.archiveRelativePath = product.id + '/' + snapshot + '/';
-    await writeFile(dir, prefix + '_product.json', JSON.stringify(product, null, 2));
+    product.archiveRelativePath = directory;
+    const jsonUrl = URL.createObjectURL(new Blob([JSON.stringify(product, null, 2)], { type: 'application/json' }));
+    try { await download(jsonUrl, directory + prefix + '_product.json'); }
+    finally { URL.revokeObjectURL(jsonUrl); }
     remember(archiveMemoryKey(product.id), {
       archivedAt: product.archivedAt,
       relativePath: product.archiveRelativePath + prefix + '_product.json',
@@ -412,10 +393,10 @@
     });
     button('存档设置', openSettings);
     const archiveButton = button('本地存档', async () => {
-      const root = await requireDirectory();
+      requireDownloadMode();
       const product = extractProduct();
-      await saveProduct(root, product, imageBlob, GM_setValue,
-        (index, count) => { status.textContent = '正在保存图片 ' + index + '/' + count; });
+      await saveProduct(product, downloadFile, GM_setValue,
+        (index, count) => { status.textContent = '正在下载图片 ' + index + '/' + count; }, GM_getValue('downloadFolder', 'BOOTH存档'));
       refreshArchiveButton(archiveButton, product.id);
     });
     refreshArchiveButton(archiveButton, location.pathname.match(/items\/(\d+)/)[1]);
@@ -431,7 +412,9 @@
     archiveMemoryKey,
     refreshArchiveButton,
     saveProduct,
-    directoryStore,
+    productId,
+    resolveShop,
+    downloadFile,
     init,
     isUnavailableItem,
     parseItemData,
