@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOOTH Archive
 // @namespace    https://github.com/uyuni-saline/booth-archive
-// @version      0.3.0
+// @version      0.3.1
 // @description  Improve BOOTH and BOOTH shop pages with optional browsing tools.
 // @author       uyuni-saline
 // @match        https://booth.pm/*
@@ -197,7 +197,7 @@
     const id = new URL(pageUrl).pathname.match(/\/(?:[a-z]{2}\/)?items\/(\d+)/)?.[1];
     if (!id) throw new Error('商品IDを取得できません。');
     const text = (root, selector) => root.querySelector(selector)?.textContent.trim() || '';
-    const title = text(doc, 'h2.item-name');
+    const title = text(doc, '#js-item-info-detail .summary header h2');
     const shopName = text(doc, '.shop-name-label') || text(doc, '.shop-name');
     const shopLink = doc.querySelector('.shop-name a[href]');
     const shopUrl = new URL(shopLink?.getAttribute('href') || '/', pageUrl).href;
@@ -258,8 +258,8 @@
   function createArchiveControl() {
     if (!/\/(?:[a-z]{2}\/)?items\/\d+\/?$/.test(location.pathname)
       || document.getElementById('booth-archive-product-tools')) return;
-    const title = document.querySelector('h2.item-name');
-    if (!title) return;
+    const detail = document.getElementById('js-item-info-detail');
+    if (!detail) return;
     const panel = document.createElement('div');
     panel.id = 'booth-archive-product-tools';
     panel.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;padding:12px;background:#fff;color:#222';
@@ -310,7 +310,7 @@
       await dir.removeEntry(prefix + '_INCOMPLETE.json');
     });
     panel.append(status);
-    title.after(panel);
+    detail.prepend(panel);
   }
 
   return {
